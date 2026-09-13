@@ -32,8 +32,8 @@ export const DEFAULT_SAFETY_FACTOR = 0.8;
  */
 export const NO_BATCH_CAP_SUB_BATCH_ITEMS = 16;
 
-export function truncateEmbedInputs(texts: ReadonlyArray<string | null | undefined>): string[] {
-  return texts.map(t => truncateUtf8(t ?? '', EMBED_MAX_CHARS));
+export function truncateEmbedInputs(texts: ReadonlyArray<string | null | undefined>, maxChars: number = EMBED_MAX_CHARS): string[] {
+  return texts.map(t => truncateUtf8(t ?? '', maxChars));
 }
 
 /**

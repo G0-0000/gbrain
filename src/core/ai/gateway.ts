@@ -33,7 +33,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { z } from 'zod';
 
-import { DEFAULT_CHARS_PER_TOKEN, DEFAULT_SAFETY_FACTOR, embedRequestMaxInputTokens, planEmbedRequests, rerankRequestMaxInputTokens, truncateEmbedInputs } from './embed-batch-plan.ts';
+import { DEFAULT_CHARS_PER_TOKEN, DEFAULT_SAFETY_FACTOR, EMBED_MAX_CHARS, embedRequestMaxInputTokens, planEmbedRequests, rerankRequestMaxInputTokens, truncateEmbedInputs } from './embed-batch-plan.ts';
 export { splitByTokenBudget, capBatchItems, NO_BATCH_CAP_SUB_BATCH_ITEMS } from './embed-batch-plan.ts';
 import { BudgetTracker, type BudgetReservation } from '../budget/budget-tracker.ts';
 import { failedCallUsage, recordOnTracker } from './budget-record.ts';
@@ -1520,14 +1520,15 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
 const MIN_SUB_BATCH = 1;
 
 /**
- * Embed many texts. Truncates to EMBED_MAX_CHARS, then dispatches based on whether
- * the recipe declares a per-batch token budget.
+ * Embed many texts. Truncates to EMBED_MAX_CHARS (8000; overridable via
+ * GBRAIN_EMBED_MAX_CHARS), then dispatches based on whether the recipe
+ * declares a per-batch token budget.
  *
  * Flow:
  * ```
  * embed(texts)
  *   ├─ resolve recipe + model
- *   ├─ truncate each text to EMBED_MAX_CHARS (8000)
+ *   ├─ truncate each text to EMBED_MAX_CHARS (8000, or GBRAIN_EMBED_MAX_CHARS)
  *   ├─ read recipe.touchpoints.embedding.{max_batch_tokens, chars_per_token, safety_factor}
  *   │
  *   ├─ if max_batch_tokens declared (Voyage path):
@@ -1607,7 +1608,16 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
   const tracker = __budgetStore.getStore() ?? null;
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
-  const truncated = truncateEmbedInputs(texts);
+  // GBRAIN_EMBED_MAX_CHARS: operator-declared per-text char cap. Local /
+  // self-hosted embedding servers (llama.cpp GGUF such as qwen3-embedding-4b)
+  // time out or overflow their context window on very long inputs; the
+  // operator must be able to bound single-input length to their hardware
+  // without forking the gateway. Same cfg.env snapshot convention as
+  // GBRAIN_EMBED_MAX_BATCH_TOKENS (#3622) — never process.env at call time.
+  // Invalid values (non-numeric, non-positive) fall back to EMBED_MAX_CHARS.
+  const envMaxCharsRaw = parseInt(cfg.env?.GBRAIN_EMBED_MAX_CHARS ?? '', 10);
+  const maxChars = Number.isFinite(envMaxCharsRaw) && envMaxCharsRaw > 0 ? envMaxCharsRaw : EMBED_MAX_CHARS;
+  const truncated = truncateEmbedInputs(texts, maxChars);
 
   // Dim override (D10) — when caller passes `dimensions`, use it. Otherwise
   // fall back to the global cfg default. dimsProviderOptions throws a
