@@ -80,6 +80,7 @@ import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationG
 import { installAICallLogFromEnv } from './call-log.ts';
 import { cachedQueryEmbedding, clearQueryEmbedCache, queryEmbedCacheKey, queryEmbedGeneration, storeQueryEmbedding } from './query-embed-cache.ts';
 import { createGuardedGeneration, chatInvocation } from './guarded-generation.ts';
+import { resolveEmbedMaxChars } from './embed-env.ts';
 installAiSdkWarningWriter();
 const guardedGeneration = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS);
 const guardedExpansion = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS, 'gateway.expand');
@@ -1520,9 +1521,8 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
 const MIN_SUB_BATCH = 1;
 
 /**
- * Embed many texts. Truncates to EMBED_MAX_CHARS (8000; overridable via
- * GBRAIN_EMBED_MAX_CHARS), then dispatches based on whether the recipe
- * declares a per-batch token budget.
+ * Embed many texts. Truncates to EMBED_MAX_CHARS (8000; overridable via GBRAIN_EMBED_MAX_CHARS),
+ * then dispatches based on the recipe's per-batch token budget declaration.
  *
  * Flow:
  * ```
@@ -1608,16 +1608,7 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
   const tracker = __budgetStore.getStore() ?? null;
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
-  // GBRAIN_EMBED_MAX_CHARS: operator-declared per-text char cap. Local /
-  // self-hosted embedding servers (llama.cpp GGUF such as qwen3-embedding-4b)
-  // time out or overflow their context window on very long inputs; the
-  // operator must be able to bound single-input length to their hardware
-  // without forking the gateway. Same cfg.env snapshot convention as
-  // GBRAIN_EMBED_MAX_BATCH_TOKENS (#3622) — never process.env at call time.
-  // Invalid values (non-numeric, non-positive) fall back to EMBED_MAX_CHARS.
-  const envMaxCharsRaw = parseInt(cfg.env?.GBRAIN_EMBED_MAX_CHARS ?? '', 10);
-  const maxChars = Number.isFinite(envMaxCharsRaw) && envMaxCharsRaw > 0 ? envMaxCharsRaw : EMBED_MAX_CHARS;
-  const truncated = truncateEmbedInputs(texts, maxChars);
+  const truncated = truncateEmbedInputs(texts, resolveEmbedMaxChars(cfg));
 
   // Dim override (D10) — when caller passes `dimensions`, use it. Otherwise
   // fall back to the global cfg default. dimsProviderOptions throws a
