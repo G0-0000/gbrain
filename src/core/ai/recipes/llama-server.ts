@@ -43,6 +43,9 @@ export const llamaServer: Recipe = {
       // more inputs with `batch size N > maximum allowed batch size 32`.
       // The token-budget split can't bound item count, so cap it here. A
       // server launched with a larger `-b` can raise this. v0.32 (#779).
+      max_batch_tokens: 4096,
+      // CJK estimate ≈1 char/token on average; conservative for mixed content.
+      chars_per_token: 1,
       max_batch_items: 32,
     },
     chat: {
