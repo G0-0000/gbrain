@@ -1748,6 +1748,28 @@ export function __getShrinkStateForTests(recipeId: string): ShrinkEntry | undefi
   return entry ? { ...entry } : undefined;
 }
 
+// local-patch: mrl-truncate — truncate a full-width model embedding to the
+// configured embedding_dimensions (first N dims) and re-L2-normalize. The
+// llama-embed server always emits its native width (2560); when a configured
+// width below that is requested this is the local MRL cut. Returns the input
+// unchanged when n >= vec.length, so the default 2560 case is byte-identical.
+function mrlTruncateAndL2(vec: Float32Array, n: number): Float32Array {
+  if (n >= vec.length) return vec;
+  const out = new Float32Array(n);
+  let sumSq = 0;
+  for (let i = 0; i < n; i++) {
+    const v = vec[i];
+    out[i] = v;
+    sumSq += v * v;
+  }
+  const norm = Math.sqrt(sumSq);
+  if (norm > 0) {
+    const inv = 1 / norm;
+    for (let i = 0; i < n; i++) out[i] *= inv;
+  }
+  return out;
+}
+
 /**
  * Embed a single sub-batch with automatic halving on token-limit errors.
  * If the batch is already at MIN_SUB_BATCH and still fails, throws.
@@ -1797,9 +1819,40 @@ async function embedSubBatch(
       );
     }
 
+    // local-patch: mrl-truncate — armed on (a) the config-driven path, where the
+    // caller passes NO `dimensions` override, OR (b) the migrate re-embed path,
+    // where `gbrain migrate embeddings --dim N` explicitly requests `dimensions`
+    // equal to the config's embedding_dimensions (cfgN) — a request whose width
+    // is exactly the target we would cut to anyway. It stays DISarmed on any
+    // other `dimensions` override (the dynamic-column path, whose requested
+    // width differs from the config width and thus carries different semantics).
+    // Only armed when the upstream endpoint returned more dims than the
+    // configured embedding_dimensions. The llama-embed server (llama-embed-t10:8084)
+    // always emits its native width (2560) and ignores `dimensions`, so a
+    // configured width below that must be cut here at this single unified embed
+    // chokepoint — every caller (ingest embed/embedBatch, embedQuery, migrate
+    // re-embed) inherits it.
+    //
+    // Scoped by recipe: relaxation is limited to providers that declare
+    // `touchpoints.embedding.trust_custom_dims` (llama-server/ollama/lmstudio/
+    // litellm-proxy/openrouter — the native width is user-declared and the
+    // endpoint cannot be asked to emit a narrower one). A provider that does
+    // not declare it (e.g. nvidia) keeps the strict mismatch check: its width
+    // is either honoured by the endpoint or fitted by `matryoshka` (PR #5921),
+    // so an over-width response there is a real mismatch, never a native width
+    // to truncate.
+    const cfgN = getEmbeddingDimensions();
+    const mrlArmed =
+      (opts?.dimensions == null || opts?.dimensions === cfgN) &&
+      typeof cfgN === 'number' &&
+      cfgN > 0 &&
+      recipe.touchpoints?.embedding?.trust_custom_dims === true;
+
     const embeddings: number[][] = result.embeddings.map((e: number[]) => fitMatryoshkaPrefix(recipe, modelId, e, expectedDims)); // PR #5921
     for (const embedding of embeddings) {
-      if (Array.isArray(embedding) && embedding.length !== expectedDims) {
+      // local-patch: mrl-truncate — allow an over-width response only when the
+      // configured width is below it; the return map below then trims + re-L2s.
+      if (Array.isArray(embedding) && embedding.length !== expectedDims && !(mrlArmed && embedding.length > cfgN)) {
         throw embeddingDimMismatchError(modelId, embedding.length, expectedDims, `gbrain migrate --embedding-model ${getEmbeddingModel()} --embedding-dimensions ${embedding.length}`, { provider: recipe.id, baseUrl: _config?.base_urls?.[recipe.id], defaultBaseUrl: recipe.base_url_default });
       }
     }
@@ -1807,7 +1860,13 @@ async function embedSubBatch(
     recordSubBatchSuccess(recipe);
     const usageTokens = (result as { usage?: { tokens?: unknown } }).usage?.tokens;
     return {
-      embeddings: embeddings.map((e: number[]) => new Float32Array(e)),
+      embeddings: embeddings.map((e: number[]) => {
+        const f = new Float32Array(e);
+        // local-patch: mrl-truncate — cut to the configured width (first N dims)
+        // and re-L2-normalize; a no-op when the model already returns exactly the
+        // configured width (current default 2560 → byte-identical unchanged).
+        return mrlArmed && f.length > cfgN ? mrlTruncateAndL2(f, cfgN) : f;
+      }),
       reportedTokens: typeof usageTokens === 'number' && Number.isFinite(usageTokens) && usageTokens > 0
         ? usageTokens
         : null,
