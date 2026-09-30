@@ -121,11 +121,20 @@ export function embedRequestMaxInputTokens(texts: string[], recipe: Recipe, mode
   return texts.reduce((sum, text) => sum + Math.min(Math.max(1, Buffer.byteLength(text, 'utf8')), perInput), 0);
 }
 
-/** Per-request input ceilings `embed()` would reserve for these texts on `modelStr`, at the declared safety factor (empty inputs are never sent, #4616). */
-export function embedRequestCeilings(texts: ReadonlyArray<string>, modelStr: string, envMaxBatchTokens?: number): number[] {
+/**
+ * Per-request input ceilings `embed()` would reserve for these texts on
+ * `modelStr`, at the declared safety factor (empty inputs are never sent,
+ * #4616). `maxChars` is the same per-text cap `embed()` truncates with:
+ * spend preflights pass `resolveEmbedMaxChars(cfg)` (the configure-time env
+ * snapshot, patch ①) so the ceiling tracks the operator's
+ * GBRAIN_EMBED_MAX_CHARS override instead of the 8000 default — a cap ABOVE
+ * 8000 would otherwise UNDER-estimate. Omitted/defaulted it is
+ * byte-identical to the pre-override prediction.
+ */
+export function embedRequestCeilings(texts: ReadonlyArray<string>, modelStr: string, envMaxBatchTokens?: number, maxChars: number = EMBED_MAX_CHARS): number[] {
   const { parsed, recipe } = resolveRecipe(modelStr);
   const safety = recipe.touchpoints?.embedding?.safety_factor ?? DEFAULT_SAFETY_FACTOR;
-  const truncated = truncateEmbedInputs(texts);
+  const truncated = truncateEmbedInputs(texts, maxChars);
   const sent = sendableEmbeddingInputs(truncated);
   if (!sent.length) return [];
   return planEmbedRequests(sent.map(i => truncated[i]!), recipe, safety, envMaxBatchTokens)

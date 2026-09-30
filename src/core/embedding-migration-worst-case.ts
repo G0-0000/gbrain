@@ -21,6 +21,8 @@
  */
 import type { BrainEngine } from './engine.ts';
 import { embedRequestCeilings, rerankRequestMaxInputTokens } from './ai/embed-batch-plan.ts';
+import { resolveEmbedMaxChars } from './ai/embed-env.ts';
+import { requireConfig } from './ai/gateway.ts';
 import { wrapChunkTextsForStoredMode } from './embedding-context.ts';
 import type { ChunkInput, CRMode } from './types.ts';
 import { readContentChunksEmbeddingDim } from './embedding-dim-check.ts';
@@ -149,9 +151,16 @@ async function eachStaleFactBatch(engine: BrainEngine, plan: EmbeddingMigrationP
 
 export async function planMigrationWorstCase(engine: BrainEngine, plan: EmbeddingMigrationPlan, opts: { rerankerModel?: string } = {}): Promise<MigrationWorstCase> {
   const envCap = Number.parseInt(process.env.GBRAIN_EMBED_MAX_BATCH_TOKENS ?? '', 10);
+  // Same effective per-text cap embed() truncates with — resolved from the
+  // gateway's configure-time env snapshot (patch ① / resolveEmbedMaxChars),
+  // never a fresh process.env read. #5680's ceiling must follow
+  // GBRAIN_EMBED_MAX_CHARS: a cap ABOVE 8000 is the under-estimating case.
+  // Without an override it stays EMBED_MAX_CHARS, byte-identical to the
+  // pre-override prediction.
+  const embedMaxChars = resolveEmbedMaxChars(requireConfig());
   const ceilings: number[] = [];
   const ceilingsOf = (texts: string[]) => texts.length
-    ? embedRequestCeilings(texts, plan.to_model, Number.isFinite(envCap) && envCap > 0 ? envCap : undefined) : [];
+    ? embedRequestCeilings(texts, plan.to_model, Number.isFinite(envCap) && envCap > 0 ? envCap : undefined, embedMaxChars) : [];
   const add = (texts: string[]) => { ceilings.push(...ceilingsOf(texts)); };
   add([MIGRATION_PROBE_TEXT]);
   for (let i = 0; i < DRAIN_PROBES; i++) add([EMBED_PROBE_TEXT]);
